@@ -1,6 +1,6 @@
 /**
  * State-based routing for AngularJS
- * @version v0.2.11
+ * @version v0.2.11-dev-2014-09-17
  * @link http://angular-ui.github.com/
  * @license MIT License, http://www.opensource.org/licenses/MIT
  */
@@ -285,6 +285,7 @@ function $Resolve(  $q,    $injector) {
    */
   this.study = function (invocables) {
     if (!isObject(invocables)) throw new Error("'invocables' must be an object");
+    var invocableKeys = Object.keys(invocables || {});
     
     // Perform a topological sort of invocables to build an ordered plan
     var plan = [], cycle = [], visited = {};
@@ -345,7 +346,7 @@ function $Resolve(  $q,    $injector) {
         if (!--wait) {
           if (!merged) merge(values, parent.$$values); 
           result.$$values = values;
-          result.$$promises = true; // keep for isResolve()
+          result.$$promises = result.$$promises || true; // keep for isResolve()
           delete result.$$inheritedValues;
           resolution.resolve(values);
         }
@@ -355,7 +356,15 @@ function $Resolve(  $q,    $injector) {
         result.$$failure = reason;
         resolution.reject(reason);
       }
-      
+
+      // TODO: Remove this when we merge in 'new' branch
+      function omit(obj) {
+        var copy = {}, keys = angular.isArray(arguments[1]) ? arguments[1] : arguments.slice(1);
+        for (var key in obj)
+          if (keys.indexOf(key) == -1) copy[key] = obj[key];
+        return copy;
+      }
+
       // Short-circuit if parent has already failed
       if (isDefined(parent.$$failure)) {
         fail(parent.$$failure);
@@ -363,20 +372,20 @@ function $Resolve(  $q,    $injector) {
       }
       
       if (parent.$$inheritedValues) {
-        merge(values, parent.$$inheritedValues);
+        merge(values, omit(parent.$$inheritedValues, invocableKeys));
       }
 
       // Merge parent values if the parent has already resolved, or merge
       // parent promises and wait if the parent resolve is still in progress.
+      extend(promises, parent.$$promises);
       if (parent.$$values) {
-        merged = merge(values, parent.$$values);
-        result.$$inheritedValues = parent.$$values;
+        merged = merge(values, omit(parent.$$values, invocableKeys));
+        result.$$inheritedValues = omit(parent.$$values, invocableKeys);
         done();
       } else {
         if (parent.$$inheritedValues) {
-          result.$$inheritedValues = parent.$$inheritedValues;
+          result.$$inheritedValues = omit(parent.$$inheritedValues, invocableKeys);
         }        
-        extend(promises, parent.$$promises);
         parent.then(done, fail);
       }
       
@@ -579,7 +588,7 @@ function $TemplateFactory(  $http,   $templateCache,   $injector) {
     if (isFunction(url)) url = url(params);
     if (url == null) return null;
     else return $http
-        .get(url, { cache: $templateCache })
+        .get(url, { cache: $templateCache, headers: { Accept: 'text/html' }})
         .then(function(response) { return response.data; });
   };
 
@@ -917,7 +926,7 @@ UrlMatcher.prototype.format = function (values) {
     value = values[param];
     cfg   = this.params[param];
 
-    if (!isDefined(value) && (segments[i] === '/' || segments[i + 1] === '/')) continue;
+    if (!isDefined(value) && (segments[i] === '/' && segments[i + 1] === '/')) continue;
     if (value != null) result += encodeURIComponent(cfg.type.encode(value));
     result += segments[i + 1];
   }
@@ -934,7 +943,7 @@ UrlMatcher.prototype.format = function (values) {
     result += (search ? '&' : '?') + param + '=' + (array ? value : encodeURIComponent(value));
     search = true;
   }
-  return result;
+  return result.replace('//', '/');
 };
 
 UrlMatcher.prototype.$types = {};
@@ -1872,6 +1881,8 @@ function $StateProvider(   $urlRouterProvider,   $urlMatcherFactory) {
 
     if (path) {
       if (!base) throw new Error("No reference point given for path '"  + name + "'");
+      base = findState(base);
+      
       var rel = name.split("."), i = 0, pathLength = rel.length, current = base;
 
       for (; i < pathLength; i++) {
@@ -2379,9 +2390,12 @@ function $StateProvider(   $urlRouterProvider,   $urlMatcherFactory) {
      *   reload: true, inherit: false, notify: false 
      * });
      * </pre>
+     *
+     * @returns {promise} A promise representing the state of the new transition. See
+     * {@link ui.router.state.$state#methods_go $state.go}.
      */
     $state.reload = function reload() {
-      $state.transitionTo($state.current, $stateParams, { reload: true, inherit: false, notify: false });
+      return $state.transitionTo($state.current, $stateParams, { reload: true, inherit: false, notify: false });
     };
 
     /**
@@ -2705,8 +2719,8 @@ function $StateProvider(   $urlRouterProvider,   $urlMatcherFactory) {
      *
      * @description
      * Similar to {@link ui.router.state.$state#methods_includes $state.includes},
-     * but only checks for the full state name. If params is supplied then it will be 
-     * tested for strict equality against the current active params object, so all params 
+     * but only checks for the full state name. If params is supplied then it will be
+     * tested for strict equality against the current active params object, so all params
      * must match with none missing and no extras.
      *
      * @example
@@ -2722,13 +2736,19 @@ function $StateProvider(   $urlRouterProvider,   $urlMatcherFactory) {
      * <div ng-class="{highlighted: $state.is('.item')}">Item</div>
      * </pre>
      *
-     * @param {string|object} stateName The state name (absolute or relative) or state object you'd like to check.
-     * @param {object=} params A param object, e.g. `{sectionId: section.id}`, that you'd like 
+     * @param {string|object} stateOrName The state name (absolute or relative) or state object you'd like to check.
+     * @param {object=} params A param object, e.g. `{sectionId: section.id}`, that you'd like
      * to test against the current active state.
+     * @param {object=} options An options object.  The options are:
+     *
+     * - **`relative`** - {string|object} -  If `stateOrName` is a relative state name and `options.relative` is set, .is will
+     * test relative to `options.relative` state (or name).
+     *
      * @returns {boolean} Returns true if it is the state.
      */
-    $state.is = function is(stateOrName, params) {
-      var state = findState(stateOrName);
+    $state.is = function is(stateOrName, params, options) {
+      options = extend({ relative: $state.$current }, options || {});
+      var state = findState(stateOrName, options.relative);
 
       if (!isDefined(state)) {
         return undefined;
@@ -2783,19 +2803,25 @@ function $StateProvider(   $urlRouterProvider,   $urlMatcherFactory) {
      *
      * @param {string} stateOrName A partial name, relative name, or glob pattern
      * to be searched for within the current state name.
-     * @param {object} params A param object, e.g. `{sectionId: section.id}`,
+     * @param {object=} params A param object, e.g. `{sectionId: section.id}`,
      * that you'd like to test against the current active state.
+     * @param {object=} options An options object.  The options are:
+     *
+     * - **`relative`** - {string|object=} -  If `stateOrName` is a relative state reference and `options.relative` is set,
+     * .includes will test relative to `options.relative` state (or name).
+     *
      * @returns {boolean} Returns true if it does include the state
      */
-    $state.includes = function includes(stateOrName, params) {
+    $state.includes = function includes(stateOrName, params, options) {
+      options = extend({ relative: $state.$current }, options || {});
       if (isString(stateOrName) && isGlob(stateOrName)) {
         if (!doesStateMatchGlob(stateOrName)) {
           return false;
         }
         stateOrName = $state.$current.name;
       }
-      var state = findState(stateOrName);
 
+      var state = findState(stateOrName, options.relative);
       if (!isDefined(state)) {
         return undefined;
       }
@@ -2848,7 +2874,7 @@ function $StateProvider(   $urlRouterProvider,   $urlMatcherFactory) {
       
       var nav = (state && options.lossy) ? state.navigable : state;
 
-      if (!nav || !nav.url) {
+      if (!nav || nav.url === undefined || nav.url === null) {
         return null;
       }
       return $urlRouter.href(nav.url, filterByKeys(objectKeys(state.params), params || {}), {
@@ -2864,13 +2890,14 @@ function $StateProvider(   $urlRouterProvider,   $urlMatcherFactory) {
      * @description
      * Returns the state configuration object for any specific state or all states.
      *
-     * @param {string|Sbject=} stateOrName (absolute or relative) If provided, will only get the config for
+     * @param {string|object=} stateOrName (absolute or relative) If provided, will only get the config for
      * the requested state. If not provided, returns an array of ALL state configs.
+     * @param {string|object=} context When stateOrName is a relative state reference, the state will be retrieved relative to context.
      * @returns {Object|Array} State configuration object or array of all objects.
      */
     $state.get = function (stateOrName, context) {
       if (arguments.length === 0) return objectKeys(states).map(function(name) { return states[name].self; });
-      var state = findState(stateOrName, context);
+      var state = findState(stateOrName, context || $state.$current);
       return (state && state.self) ? state.self : null;
     };
 
@@ -3075,7 +3102,7 @@ angular.module('ui.router.state').provider('$uiViewScroll', $ViewScrollProvider)
  * @description
  * The ui-view directive tells $state where to place your templates.
  *
- * @param {string=} ui-view A view name. The name should be unique amongst the other views in the
+ * @param {string=} name A view name. The name should be unique amongst the other views in the
  * same state. You can have views of the same name that live in different states.
  *
  * @param {string=} autoscroll It allows you to set the scroll behavior of the browser window
@@ -3172,8 +3199,8 @@ angular.module('ui.router.state').provider('$uiViewScroll', $ViewScrollProvider)
  * <ui-view autoscroll='scopeVariable'/>
  * </pre>
  */
-$ViewDirective.$inject = ['$state', '$injector', '$uiViewScroll'];
-function $ViewDirective(   $state,   $injector,   $uiViewScroll) {
+$ViewDirective.$inject = ['$state', '$injector', '$uiViewScroll', '$interpolate'];
+function $ViewDirective(   $state,   $injector,   $uiViewScroll,   $interpolate) {
 
   function getService() {
     return ($injector.has) ? function(service) {
@@ -3203,8 +3230,14 @@ function $ViewDirective(   $state,   $injector,   $uiViewScroll) {
 
     if ($animate) {
       return {
-        enter: function(element, target, cb) { $animate.enter(element, null, target, cb); },
-        leave: function(element, cb) { $animate.leave(element, cb); }
+        enter: function(element, target, cb) {
+          var promise = $animate.enter(element, null, target, cb);
+          if (promise && promise.then) promise.then(cb);
+        },
+        leave: function(element, cb) {
+          var promise = $animate.leave(element, cb);
+          if (promise && promise.then) promise.then(cb);
+        }
       };
     }
 
@@ -3264,7 +3297,7 @@ function $ViewDirective(   $state,   $injector,   $uiViewScroll) {
 
         function updateView(firstTime) {
           var newScope,
-              name            = getUiViewName(attrs, $element.inheritedData('$uiView')),
+              name            = getUiViewName(scope, attrs, $element, $interpolate),
               previousLocals  = name && $state.$current && $state.$current.locals[name];
 
           if (!firstTime && previousLocals === latestLocals) return; // nothing to do
@@ -3273,6 +3306,10 @@ function $ViewDirective(   $state,   $injector,   $uiViewScroll) {
 
           var clone = $transclude(newScope, function(clone) {
             renderer.enter(clone, $element, function onUiViewEnter() {
+              if(currentScope) {
+                currentScope.$emit('$viewContentAnimationEnded');
+              }
+
               if (angular.isDefined(autoScrollExp) && !autoScrollExp || scope.$eval(autoScrollExp)) {
                 $uiViewScroll(clone);
               }
@@ -3302,8 +3339,8 @@ function $ViewDirective(   $state,   $injector,   $uiViewScroll) {
   return directive;
 }
 
-$ViewDirectiveFill.$inject = ['$compile', '$controller', '$state'];
-function $ViewDirectiveFill ($compile, $controller, $state) {
+$ViewDirectiveFill.$inject = ['$compile', '$controller', '$state', '$interpolate'];
+function $ViewDirectiveFill (  $compile,   $controller,   $state,   $interpolate) {
   return {
     restrict: 'ECA',
     priority: -400,
@@ -3311,7 +3348,7 @@ function $ViewDirectiveFill ($compile, $controller, $state) {
       var initial = tElement.html();
       return function (scope, $element, attrs) {
         var current = $state.$current,
-            name = getUiViewName(attrs, $element.inheritedData('$uiView')),
+            name = getUiViewName(scope, attrs, $element, $interpolate),
             locals  = current && current.locals[name];
 
         if (! locals) {
@@ -3341,10 +3378,11 @@ function $ViewDirectiveFill ($compile, $controller, $state) {
 
 /**
  * Shared ui-view code for both directives:
- * Given attributes and inherited $uiView data, return the view's name
+ * Given scope, element, and its attributes, return the view's name
  */
-function getUiViewName(attrs, inherited) {
-  var name = attrs.uiView || attrs.name || '';
+function getUiViewName(scope, attrs, element, $interpolate) {
+  var name = $interpolate(attrs.uiView || attrs.name || '')(scope);
+  var inherited = element.inheritedData('$uiView');
   return name.indexOf('@') >= 0 ?  name :  (name + '@' + (inherited ? inherited.state.name : ''));
 }
 
@@ -3439,6 +3477,7 @@ function $StateRefDirective($state, $timeout) {
     link: function(scope, element, attrs, uiSrefActive) {
       var ref = parseStateRef(attrs.uiSref, $state.current.name);
       var params = null, url = null, base = stateContext(element) || $state.$current;
+      var newHref = null, isAnchor = element.prop("tagName") === "A";
       var isForm = element[0].nodeName === "FORM";
       var attr = isForm ? "action" : "href", nav = true;
 
@@ -3455,7 +3494,7 @@ function $StateRefDirective($state, $timeout) {
         if (newVal) params = newVal;
         if (!nav) return;
 
-        var newHref = $state.href(ref.state, params, options);
+        newHref = $state.href(ref.state, params, options);
 
         var activeDirective = uiSrefActive[1] || uiSrefActive[0];
         if (activeDirective) {
@@ -3465,7 +3504,7 @@ function $StateRefDirective($state, $timeout) {
           nav = false;
           return false;
         }
-        element[0][attr] = newHref;
+        attrs.$set(attr, newHref);
       };
 
       if (ref.paramExpr) {
@@ -3487,8 +3526,11 @@ function $StateRefDirective($state, $timeout) {
           });
           e.preventDefault();
 
+          // if the state has no URL, ignore one preventDefault from the <a> directive.
+          var ignorePreventDefaultCount = isAnchor && !newHref ? 1: 0;
           e.preventDefault = function() {
-            $timeout.cancel(transition);
+            if (ignorePreventDefaultCount-- <= 0)
+              $timeout.cancel(transition);
           };
         }
       });
@@ -3604,7 +3646,7 @@ function $StateRefActiveDirective($state, $stateParams, $interpolate) {
         if (typeof $attrs.uiSrefActiveEq !== 'undefined') {
           return $state.$current.self === state && matchesParams();
         } else {
-          return $state.includes(state.name) && matchesParams();
+          return state && $state.includes(state.name) && matchesParams();
         }
       }
 
